@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>Ferocious Kalman</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<style>
+			body {
+				font-family: Monospace;
+				background-color: #f0f0f0;
+				margin: 0px;
+				overflow: hidden;
+			}
+			#info {
+				position: absolute;
+				top: 0px;
+				width: 100%;
+				padding: 5px;
+				font-family:Monospace;
+				font-size:13px;
+				text-align:center;
+				color: #ffffff;
+			}
+			#loading {
+				position: absolute;
+				top: 200px;
+				width: 100%;
+				padding: 5px;
+				font-family:Monospace;
+				font-size:18px;
+				text-align:center;
+				color: #ffffff;
+			}
+			a { color: #ffffff; }
+		</style>
+		<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></script>
+	</head>
+	<body>
+		<div id="container"></div>
+		<div id="info">
+			<a href="http://www.koohifar.com" target="_blank" rel="noopener">koohifar.com</a> - Ferocious Kalman
+		</div>
+		<p id="loading"></p>
+		<script src="three/build/three.js"></script>
+		<script src="three/examples/js/controls/OrbitControls.js"></script>
+		<script src="three/examples/js/WebGL.js"></script>
+		<script src="three/examples/js/libs/dat.gui.min.js"></script>
+		<script src="three/examples/js/libs/stats.min.js"></script>
+		<script src="three/examples/js/loaders/GLTFLoader.js"></script>
+		<script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/3.2.1/math.js"></script>
+
+		<script>
+			var container, stats, rtt;
+			var camera, scene, renderer;
+			var meshSolid, meshWires, pivotSolid, pivotWires, controls;
+			var defaultPNAmp =0.005;
+			var defaultMNAmp =0.01;
+			var quaternionStar = new THREE.Quaternion(0,0,0,1);
+			var quaternionHat = new THREE.Quaternion(0,0,0,1);
+			var quaternionMeasured = new THREE.Quaternion(0,0,0,1);
+			var xkk = [[0],[0],[0],[1]];
+			var pkk = [[0.1,0,0,0],[0,0.1,0,0],[0,0,0.1,0],[0,0,0,0.1]];
+			const I = [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]];
+			const I100 = [[100,0,0,0],[0,100,0,0],[0,0,100,0],[0,0,0,100]];
+			var xmlhttp = new XMLHttpRequest();
+			var url = "http://www.koohifar.com/api/rotation";
+			var params = {
+				"Q" : "1x correct value",
+				"R" : "1x correct value",
+				"measurement noise amp" : "1x default value",
+				"process noise amp" : "1x default value",
+				"show estimation" : true,
+				"show real process" : true
+			};
+			Math.nrand = function() {
+				var x1, x2, rad, y1;
+				do {
+					x1 = 2 * this.random() - 1;
+					x2 = 2 * this.random() - 1;
+					rad = x1 * x1 + x2 * x2;
+				} while(rad >= 1 || rad == 0);
+				var c = this.sqrt(-2 * Math.log(rad) / rad);
+				return x1 * c;
+			};
+			Math.nrandVec = function(dim){
+				var result = [];
+				for (var i=0; i<dim; i++){
+					result[i]=Math.nrand();
+				}
+				return result;
+			}
+			Math.amplitude = function (vec) {
+				var sum = 0;
+				for (var i=0; i< vec.length; i++){
+					sum = sum + Math.pow( vec[i], 2);
+				}
+				return Math.sqrt (sum);
+			};
+			Math.normalize = function (vec) {
+				var amplitude = Math.amplitude(vec);
+				for (var i=0;i<4;i++){
+					vec[i] = vec[i]/amplitude;
+				}
+				return vec;
+			};
+			Math.normalizeAdd = function (vec1, vec2) {
+				var result = [];
+				if (vec1.length === vec2.length){
+					for (var i=0; i<vec1.length; i++){
+						result[i] = vec1[i]+vec2[i];
+					}
+					return Math.normalize(result);
+				}
+			};
+			Math.normalizeAddNoise = function (vec, amp){
+				var noise = Math.nrandVec (vec.length);
+				for (var i=0; i< vec.length; i++){
+					noise[i] = noise[i] * amp;
+				}
+				return Math.normalizeAdd (vec, noise);
+			}
+			vectorToQuaternion = function(vec){
+				return new THREE.Quaternion(vec[0],vec[1],vec[2],vec[3]);
+			}
+			quaternionToVector = function (quater){
+				return [quater.x,quater.y,quater.z,quater.w];
+			}
+			if ( WEBGL.isWebGLAvailable() === false ) {
+				document.body.appendChild( WEBGL.getWebGLErrorMessage() );
+			}
+			xmlhttp.onreadystatechange = function() {
+				if (this.readyState == 4 && this.status == 200) {
+					var myArr = JSON.parse(this.responseText);
+					quaternionStar.x = myArr.x;
+					quaternionStar.y = myArr.z;
+					quaternionStar.z = myArr.y;
+					quaternionStar.w = myArr.w;
+					if (typeof rtt !== 'undefined'){
+						rtt.end();
+					}
+				}
+			};
+			console.log("ready to open")
+			xmlhttp.open("GET", url, true);
+			console.log("ready to send")
+			xmlhttp.send();
+			init();
+			animate();
+
+			function init() {
+
+				var urls = [ 'px.jpg', 'nx.jpg', 'py.jpg', 'ny.jpg', 'pz.jpg', 'nz.jpg' ];
+				var loader = new THREE.CubeTextureLoader().setPath( 'three/examples/textures/cube/skybox/' );
+				var background = loader.load( urls );
+				
+				container = document.getElementById( 'container' );
+
+				camera = new THREE.PerspectiveCamera( 45, window.innerWidth / window.innerHeight, 1, 2000 );
+				camera.position.set( 0, 0, 50 );
+
+				scene = new THREE.Scene();
+				scene.background = background;
+				scene.fog = new THREE.Fog( 0x000000, 1, 15000 );
+				var light = new THREE.HemisphereLight( 0xbbbbff, 0x444422 );
+				light.position.set( 0, 1, 0 );
+				scene.add( light );
+				scene.add( camera );
+				var light = new THREE.AmbientLight( 0x111111 );
+				scene.add( light );
+
+				var manager = new THREE.LoadingManager();
+				manager.onStart = function ( url, itemsLoaded, itemsTotal ) {
+					console.log( 'Started loading file: ' + url + '.\nLoaded ' + itemsLoaded + ' of ' + itemsTotal + ' files.' );
+				};
+				manager.onLoad = function ( ) {
+					document.getElementById("loading").innerHTML = '' ;
+				};
+				manager.onProgress = function ( url, itemsLoaded, itemsTotal ) {
+					document.getElementById("loading").innerHTML = 'Loaded ' + itemsLoaded + ' of ' + itemsTotal + '<br>' + url;
+				};
+				manager.onError = function ( url ) {
+					console.log( 'There was an error loading ' + url );
+				};
+				var loader = new THREE.GLTFLoader(manager).setPath( "su35/" );
+				loader.load( "scene.gltf", function ( gltf ) {
+					gltf.scene.traverse( function ( child ) {
+						if ( child.isMesh ) {
+							child.material.envMap = background;
+						}
+					} );
+					var material = new THREE.MeshBasicMaterial({
+						color: 0xFF0000,
+						wireframe: true
+					});
+					this.meshWires = gltf.scene.clone()
+					this.meshWires.traverse( function( node ) {
+						if (!node.isMesh) return;
+						//node.material.wireframe = true;
+						node.material = material;
+						/*
+						if( node.material ) {
+							node.material.opacity = 0.5;
+							node.material.transparent = true;
+						}*/
+					});
+					var box2 = new THREE.Box3().setFromObject( this.meshWires );
+					box2.center( this.meshWires.position ); // this re-sets the wires position
+					this.meshWires.position.multiplyScalar( - 1 );
+					this.pivotWires = new THREE.Group();
+					scene.add( this.pivotWires );
+					this.pivotWires.add( this.meshWires );
+
+
+
+					this.meshSolid = gltf.scene;
+					var box = new THREE.Box3().setFromObject( this.meshSolid );
+					box.center( meshSolid.position ); // this re-sets the mesh position
+					this.meshSolid.position.multiplyScalar( - 1 );
+					this.pivotSolid = new THREE.Group();
+					scene.add( this.pivotSolid );
+					this.pivotSolid.add( this.meshSolid );
+					if (typeof this.controls !== 'undefined'){
+							this.controls.update();
+					}
+
+				}, undefined, function ( e ) {
+					console.error( e );
+				} );
+
+				var gui = new dat.GUI(   { "autoPlace": true, "height" : 200 * 32 - 1} );
+				var real = gui.addFolder( 'Real Values' );
+				real.add(this.params, "process noise amp", ["external", "10x default value", "1x default value", "0.1x default value" ] );
+				real.add(this.params, "measurement noise amp", [ "10x default value", "1x default value", "0.1x default value" ] );
+				real.open();
+				var thinks = gui.addFolder( 'What Kalman Thinks' );
+				thinks.add(this.params, "Q", [ "100x correct value", "1x correct value", "0.01x correct value" ] );
+				thinks.add(this.params, "R", [ "100x correct value", "1x correct value", "0.01x correct value" ] );
+				thinks.open();
+				var real = gui.addFolder( 'Display' );
+				real.add(this.params, "show estimation", true );
+				real.add(this.params, "show real process", true );
+				real.open();
+				gui.width = 400;
+
+				renderer = new THREE.WebGLRenderer();
+				renderer.setPixelRatio( window.devicePixelRatio );
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				renderer.gammaOutput = true;
+				
+				container.appendChild( renderer.domElement );
+
+				this.controls = new THREE.OrbitControls( camera, renderer.domElement );
+				this.controls.minDistance = 50;
+				this.controls.maxDistance = 100;
+				if (typeof this.controls !== 'undefined'){
+						this.controls.update();
+				}
+
+				stats = new Stats();
+				stats.domElement.style.cssText = 'position:absolute;top:0px;left:0px;';
+				container.appendChild( stats.dom );
+				rtt = new Stats();
+				rtt.showPanel(1);
+				rtt.domElement.style.cssText = 'position:absolute;top:0px;left:80px;';
+				container . appendChild (rtt.dom);
+
+				window.addEventListener( 'resize', onWindowResize, false );
+			}
+
+			function onWindowResize() {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				if (typeof this.controls !== 'undefined'){
+					this.controls.update();
+				}
+			}
+
+			function animate() {
+				var pNAmp;
+				var mNAmp;
+				var Q,R;
+				var correctQ, correctR;
+				if (this.params["process noise amp"]!=="external"){
+					if (this.params["process noise amp"]==="10x default value"){
+						pNAmp = 10 * this.defaultPNAmp;
+					}
+					if (this.params["process noise amp"]==="1x default value"){
+						pNAmp = this.defaultPNAmp;
+					}
+					if (this.params["process noise amp"]==="0.1x default value"){
+						pNAmp = 0.1 * this.defaultPNAmp;
+					}
+					this.quaternionStar = this.vectorToQuaternion ( Math.normalizeAddNoise( this.quaternionToVector (this.quaternionStar), pNAmp));
+				}else{
+					pNAmp = this.defaultPNAmp;
+					if (xmlhttp.readyState == 4){
+						rtt.begin();
+						xmlhttp.open("GET", url, true);
+						xmlhttp.send();
+					}
+				}
+				if (this.params["measurement noise amp"]==="10x default value"){
+					mNAmp = 10 * this.defaultMNAmp;
+				}
+				if (this.params["measurement noise amp"]==="1x default value"){
+					mNAmp = this.defaultMNAmp;
+				}
+				if (this.params["measurement noise amp"]==="0.1x default value"){
+					mNAmp = 0.1 * this.defaultMNAmp;
+				}
+				correctQ = [[pNAmp*pNAmp,0,0,0],[0,pNAmp*pNAmp,0,0],[0,0,pNAmp*pNAmp,0],[0,0,0,pNAmp*pNAmp]];
+				correctR = [[mNAmp*mNAmp,0,0,0],[0,mNAmp*mNAmp,0,0],[0,0,mNAmp*mNAmp,0],[0,0,0,mNAmp*mNAmp]];
+				if (this.params["Q"]==="0.01x correct value"){
+					Q = math.multiply( correctQ, math.inv (I100));
+				}
+				if (this.params["Q"]==="1x correct value"){
+					Q = correctQ;
+				}
+				if (this.params["Q"]==="100x correct value"){
+					Q = math.multiply(I100, correctQ);
+				}
+				if (this.params["R"]==="0.01x correct value"){
+					R = math.multiply( correctR,math.inv(I100));
+				}
+				if (this.params["R"]==="1x correct value"){
+					R = correctR;
+				}
+				if (this.params["R"]==="100x correct value"){
+					R = math.multiply(I100, correctR);
+				}
+
+				var measure =  (Math.normalizeAddNoise( this.quaternionToVector (this.quaternionStar), mNAmp));
+				var measurement = [ [measure[0]], [measure[1]] , [measure[2]] ,[measure[3]]]
+				//console.log('redid');
+				//console.log(this.pkk);
+				//console.log(Q);
+				var pkk1 = math.add( this.pkk , Q);
+				//console.log(measurement);
+				//console.log(this.xkk);
+				var yTilde = math.subtract( measurement, this.xkk);
+				//console.log('redid1');
+				var sk = math.add( R , pkk1);
+				//console.log('redid2');
+				var kk = math.multiply( pkk1 , math.inv(sk));
+				//console.log('redid3');
+				this.xkk = math.add(xkk , math.multiply( kk,yTilde));
+				console.log(this.xkk[0][0]);
+				var length = Math.sqrt(this.xkk[0][0]*this.xkk[0][0] +  this.xkk[1][0]*this.xkk[1][0] +  this.xkk[2][0]*this.xkk[2][0] +  this.xkk[3][0]*this.xkk[3][0]);
+				this.xkk[0][0] = this.xkk[0][0]/length
+				this.xkk[1][0] = this.xkk[1][0]/length
+				this.xkk[2][0] = this.xkk[2][0]/length
+				this.xkk[3][0] = this.xkk[3][0]/length
+				//console.log('redid4');
+				this.pkk = math.add(math.multiply( math.multiply( math.subtract (I , kk) , pkk1 ), math.transpose ( math.subtract(I , kk) )) ,math.multiply(math.multiply( kk , R) , math.transpose (kk)));
+				//console.log('redid5');
+				this.quaternionHat.x=this.xkk[0][0];
+				this.quaternionHat.y=this.xkk[1][0];
+				this.quaternionHat.z=this.xkk[2][0];
+				this.quaternionHat.w=this.xkk[3][0];
+				
+				if (typeof this.pivotSolid !== 'undefined'){
+					this.pivotSolid.setRotationFromQuaternion( this.quaternionHat );
+					if (this.params["show estimation"]===true){
+						this.pivotSolid.traverse ( function (child) {
+							if (child instanceof THREE.Mesh) {
+								child.visible = true;
+							}
+						});
+					}else{
+						this.pivotSolid.traverse ( function (child) {
+							if (child instanceof THREE.Mesh) {
+								child.visible = false;
+							}
+						});
+					}
+				}
+				if (typeof this.pivotWires !== 'undefined'){
+					this.pivotWires.setRotationFromQuaternion( this.quaternionStar );
+					if (this.params["show real process"]===true){
+						this.pivotWires.traverse ( function (child) {
+							if (child instanceof THREE.Mesh) {
+								child.visible = true;
+							}
+						});
+					}else{
+						this.pivotWires.traverse ( function (child) {
+							if (child instanceof THREE.Mesh) {
+								child.visible = false;
+							}
+						});
+					}
+				}
+				requestAnimationFrame( animate );
+				renderer.render( scene, camera );
+				stats.update();
+			}
+
+		</script>
+
+	</body>
+</html>
